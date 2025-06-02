@@ -1,10 +1,5 @@
 fastapi==0.104.1
-uvicorn[standard]==0.24.0
+uvicorn==0.24.0
 google-cloud-bigquery==3.13.0
-pandas==2.2.0
-numpy==1.26.0
 httpx==0.25.2
-APScheduler==3.10.4
 pydantic==2.5.0
-python-multipart==0.0.6
-tenacity==8.2.3
