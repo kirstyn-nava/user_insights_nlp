@@ -1,0 +1,12 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+google-cloud-bigquery==3.13.0
+spacy==3.7.2
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.0/en_core_web_sm-3.7.0-py3-none-any.whl
+pandas==2.1.3
+numpy==1.25.2
+httpx==0.25.2
+APScheduler==3.10.4
+pydantic==2.5.0
+python-multipart==0.0.6
+tenacity==8.2.3
