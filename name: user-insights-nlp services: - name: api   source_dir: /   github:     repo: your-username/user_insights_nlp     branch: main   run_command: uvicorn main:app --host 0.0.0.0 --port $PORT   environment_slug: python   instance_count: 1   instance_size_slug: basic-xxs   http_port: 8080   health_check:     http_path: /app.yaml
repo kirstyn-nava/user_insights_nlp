@@ -1,0 +1,21 @@
+name: user-insights-nlp
+services:
+- name: api
+  source_dir: /
+  github:
+    repo: kirstyn-nava/user_insights_nlp
+    branch: main
+  run_command: uvicorn main:app --host 0.0.0.0 --port $PORT
+  environment_slug: python
+  instance_count: 1
+  instance_size_slug: basic-xxs
+  http_port: 8080
+  health_check:
+    http_path: /health
+  envs:
+  - key: ENVIRONMENT
+    scope: RUN_TIME
+    value: production
+  - key: PORT
+    scope: RUN_TIME
+    value: "8080"
