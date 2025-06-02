@@ -33,16 +33,19 @@ class SupportTicketNLPProcessor:
             print("Warning: spaCy model not found. Entity extraction will be disabled.")
             self.nlp = None
         
-        # Initialize keyword patterns
+        # Event-specific topic keywords
         self.topic_keywords = {
-            'alerts': ['alert', 'notification', 'alarm', 'warning', 'trigger', 'notify'],
+            'events': ['webinar', 'workshop', 'event', 'registration', 'attend', 'grafanacon', 'community call'],
+            'kubernetes': ['kubernetes', 'k8s', 'container', 'pod', 'deployment', 'helm'],
+            'prometheus': ['prometheus', 'promql', 'metrics', 'scraping', 'targets'],
             'dashboards': ['dashboard', 'panel', 'visualization', 'chart', 'graph', 'widget'],
+            'alerts': ['alert', 'notification', 'alarm', 'warning', 'trigger', 'notify'],
+            'observability': ['observability', 'monitoring', 'logging', 'tracing', 'telemetry'],
             'billing': ['billing', 'payment', 'invoice', 'charge', 'cost', 'price', 'subscription'],
             'authentication': ['login', 'password', 'auth', 'signin', 'sso', 'ldap', 'oauth'],
             'performance': ['slow', 'performance', 'timeout', 'lag', 'speed', 'loading', 'latency'],
             'integrations': ['integration', 'api', 'webhook', 'connector', 'plugin', 'export'],
-            'data_sources': ['datasource', 'database', 'prometheus', 'influxdb', 'elasticsearch'],
-            'scaling': ['scale', 'enterprise', 'team', 'users', 'capacity', 'limits', 'upgrade']
+            'data_sources': ['datasource', 'database', 'influxdb', 'elasticsearch', 'mysql', 'postgres']
         }
         
         # Intent and growth signal patterns
