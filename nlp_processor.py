@@ -28,10 +28,12 @@ class SupportTicketNLPProcessor:
         
         # Load spaCy model
         try:
-            self.nlp = spacy.load("en_core_web_sm")
-        except OSError:
-            print("Warning: spaCy model not found. Entity extraction will be disabled.")
-            self.nlp = None
+    import spacy
+    nlp = spacy.load("en_core_web_sm")
+    print("✅ spaCy model loaded successfully!")
+except (OSError, ImportError):
+    print("⚠️ spaCy model not available - entity extraction disabled")
+    nlp = None
         
         # Event-specific topic keywords
         self.topic_keywords = {
