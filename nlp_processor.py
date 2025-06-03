@@ -1,56 +1,35 @@
 import pandas as pd
 import numpy as np
-from google.cloud import bigquery
 import spacy
 from collections import Counter
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
-import os
-import asyncio
-from typing import Dict, List, Optional
 
-class SupportTicketNLPProcessor:
-    def __init__(self, project_id: str, dataset_id: str):
-        self.project_id = project_id
-        self.dataset_id = dataset_id
-        
-        # Initialize BigQuery client with credentials from environment
-        credentials_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-        if credentials_json:
-            import json
-            from google.oauth2 import service_account
-            credentials_info = json.loads(credentials_json)
-            credentials = service_account.Credentials.from_service_account_info(credentials_info)
-            self.client = bigquery.Client(project=project_id, credentials=credentials)
-        else:
-            self.client = bigquery.Client(project=project_id)
-        
-        # Load spaCy model
-        try:
-    import spacy
+# Load spaCy model for NLP processing
+# Install with: python -m spacy download en_core_web_sm
+try:
     nlp = spacy.load("en_core_web_sm")
     print("✅ spaCy model loaded successfully!")
-except (OSError, ImportError):
-    print("⚠️ spaCy model not available - entity extraction disabled")
+except OSError:
+    print("❌ Please install spaCy English model: python -m spacy download en_core_web_sm")
     nlp = None
-        
-        # Event-specific topic keywords
+
+class SupportTicketNLPParser:
+    def __init__(self):
+        # Define topic keywords for classification
         self.topic_keywords = {
-            'events': ['webinar', 'workshop', 'event', 'registration', 'attend', 'grafanacon', 'community call'],
-            'kubernetes': ['kubernetes', 'k8s', 'container', 'pod', 'deployment', 'helm'],
-            'prometheus': ['prometheus', 'promql', 'metrics', 'scraping', 'targets'],
-            'dashboards': ['dashboard', 'panel', 'visualization', 'chart', 'graph', 'widget'],
             'alerts': ['alert', 'notification', 'alarm', 'warning', 'trigger', 'notify'],
-            'observability': ['observability', 'monitoring', 'logging', 'tracing', 'telemetry'],
+            'dashboards': ['dashboard', 'panel', 'visualization', 'chart', 'graph', 'widget'],
             'billing': ['billing', 'payment', 'invoice', 'charge', 'cost', 'price', 'subscription'],
             'authentication': ['login', 'password', 'auth', 'signin', 'sso', 'ldap', 'oauth'],
             'performance': ['slow', 'performance', 'timeout', 'lag', 'speed', 'loading', 'latency'],
             'integrations': ['integration', 'api', 'webhook', 'connector', 'plugin', 'export'],
-            'data_sources': ['datasource', 'database', 'influxdb', 'elasticsearch', 'mysql', 'postgres']
+            'data_sources': ['datasource', 'database', 'prometheus', 'influxdb', 'elasticsearch'],
+            'scaling': ['scale', 'enterprise', 'team', 'users', 'capacity', 'limits', 'upgrade']
         }
         
-        # Intent and growth signal patterns
+        # Intent classification patterns
         self.intent_patterns = {
             'frustration': [
                 r'\b(frustrated?|annoying|terrible|awful|hate|broken|useless)\b',
@@ -74,6 +53,7 @@ except (OSError, ImportError):
             ]
         }
         
+        # Growth signal patterns
         self.growth_signals = {
             'enterprise_interest': [
                 r'\b(enterprise|sso|ldap|saml|compliance|audit)\b',
@@ -92,89 +72,17 @@ except (OSError, ImportError):
             ]
         }
 
-    def process_tickets_timeframe(self, days_back: int = 1, force_reprocess: bool = False) -> pd.DataFrame:
-        """Process tickets from a specific timeframe"""
-        
-        # Build query based on parameters
-        where_clause = f"WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY)"
-        
-        if not force_reprocess:
-            # Only process tickets not already processed (or processed more than 24 hours ago)
-            where_clause += f"""
-            AND ticket_id NOT IN (
-                SELECT ticket_id FROM `{self.project_id}.{self.dataset_id}.support_ticket_nlp` 
-                WHERE processed_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-            )
-            """
-        
-        query = f"""
-        SELECT 
-            ticket_id,
-            user_id,
-            message,
-            topic,
-            status,
-            created_at,
-            priority,
-            first_response_time_hours,
-            resolution_time_hours
-        FROM `{self.project_id}.{self.dataset_id}.support_tickets`
-        {where_clause}
-        ORDER BY created_at DESC
-        """
-        
+    def load_support_tickets(self, csv_path='support_tickets.csv'):
+        """Load support tickets from CSV file"""
         try:
-            tickets_df = self.client.query(query).to_dataframe()
-        except Exception as e:
-            print(f"Error querying BigQuery: {str(e)}")
-            # Return empty DataFrame if query fails
-            return pd.DataFrame()
-        
-        if len(tickets_df) == 0:
-            print(f"No tickets to process for the last {days_back} days")
-            return pd.DataFrame()
-        
-        print(f"Processing {len(tickets_df)} tickets from the last {days_back} days...")
-        
-        # Process each ticket
-        results = []
-        for _, ticket in tickets_df.iterrows():
-            result = self._process_single_ticket(ticket)
-            results.append(result)
-        
-        return pd.DataFrame(results)
-    
-    def _process_single_ticket(self, ticket) -> Dict:
-        """Process a single ticket and return results"""
-        message = ticket.get('message', '')
-        
-        # Extract insights using existing methods
-        topics = self.extract_topics(message)
-        intent = self.classify_intent(message)
-        growth_signals = self.detect_growth_signals(message)
-        entities = self.extract_entities(message) if self.nlp else {}
-        urgency_score = self.calculate_urgency_score(message, ticket.get('priority', 'medium'))
-        
-        return {
-            'ticket_id': ticket.get('ticket_id'),
-            'user_id': ticket.get('user_id'),
-            'original_topic': ticket.get('topic'),
-            'detected_topics': topics,
-            'primary_topic': topics[0] if topics else 'general',
-            'intent': intent,
-            'growth_signals': growth_signals,
-            'urgency_score': round(urgency_score, 2),
-            'entities': entities,
-            'created_at': ticket.get('created_at'),
-            'status': ticket.get('status'),
-            'first_response_time_hours': ticket.get('first_response_time_hours'),
-            'resolution_time_hours': ticket.get('resolution_time_hours'),
-            'processed_at': datetime.now(),
-            'has_growth_signal': len(growth_signals) > 0,
-            'is_frustrated': intent == 'frustration',
-            'is_expansion_interested': intent == 'expansion_interest'
-        }
-    
+            df = pd.read_csv(csv_path)
+            print(f"✅ Loaded {len(df)} tickets from {csv_path}")
+            return df
+        except FileNotFoundError:
+            print(f"❌ Could not find {csv_path}")
+            print("Make sure the support_tickets.csv file is in the same directory as this script")
+            return None
+
     def extract_topics(self, text):
         """Extract topics from ticket text using keyword matching"""
         if pd.isna(text):
@@ -233,10 +141,10 @@ except (OSError, ImportError):
 
     def extract_entities(self, text):
         """Extract named entities using spaCy"""
-        if not self.nlp or pd.isna(text):
+        if not nlp or pd.isna(text):
             return {}
             
-        doc = self.nlp(str(text))
+        doc = nlp(str(text))
         entities = {
             'organizations': [ent.text for ent in doc.ents if ent.label_ == "ORG"],
             'products': [ent.text for ent in doc.ents if ent.label_ == "PRODUCT"],
@@ -266,62 +174,76 @@ except (OSError, ImportError):
         urgency_adjustment = min(urgency_count * 0.1, 0.3)
         
         return min(base_score + urgency_adjustment, 1.0)
-    
-    def save_to_bigquery(self, results_df: pd.DataFrame, table_name: str = 'support_ticket_nlp'):
-        """Save results to BigQuery with upsert logic"""
-        if len(results_df) == 0:
-            print("No results to save")
-            return
-        
-        # Prepare data for BigQuery
-        bq_df = results_df.copy()
-        bq_df['detected_topics'] = bq_df['detected_topics'].apply(json.dumps)
-        bq_df['growth_signals'] = bq_df['growth_signals'].apply(json.dumps)
-        bq_df['entities'] = bq_df['entities'].apply(json.dumps)
-        
-        table_id = f"{self.project_id}.{self.dataset_id}.{table_name}"
-        
-        # Use WRITE_APPEND for incremental updates
-        job_config = bigquery.LoadJobConfig(
-            write_disposition="WRITE_APPEND",
-            create_disposition="CREATE_IF_NEEDED",
-            schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION]
-        )
-        
-        print(f"Saving {len(bq_df)} processed tickets to {table_id}")
-        try:
-            job = self.client.load_table_from_dataframe(bq_df, table_id, job_config=job_config)
-            job.result()
-            print(f"✅ Successfully saved to BigQuery table: {table_id}")
-        except Exception as e:
-            print(f"❌ Error saving to BigQuery: {str(e)}")
-            raise e
-    
-    def get_latest_insights(self) -> Dict:
-        """Get latest processing insights from BigQuery"""
-        query = f"""
-        SELECT 
-            COUNT(*) as total_tickets,
-            COUNT(CASE WHEN has_growth_signal THEN 1 END) as growth_signals,
-            COUNT(CASE WHEN is_frustrated THEN 1 END) as frustrated_customers,
-            COUNT(CASE WHEN is_expansion_interested THEN 1 END) as expansion_interested,
-            AVG(urgency_score) as avg_urgency_score,
-            MAX(processed_at) as last_processed
-        FROM `{self.project_id}.{self.dataset_id}.support_ticket_nlp`
-        WHERE processed_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-        """
-        
-        try:
-            result = self.client.query(query).to_dataframe()
-            return result.iloc[0].to_dict() if len(result) > 0 else {}
-        except Exception as e:
-            print(f"Error getting insights: {str(e)}")
-            return {}
 
-    def generate_insights_summary(self, results_df: pd.DataFrame) -> Dict:
+    def process_tickets(self, csv_path='support_tickets.csv'):
+        """Main processing function"""
+        print("🤖 Starting NLP processing of support tickets...")
+        
+        # Load tickets from CSV
+        tickets_df = self.load_support_tickets(csv_path)
+        if tickets_df is None:
+            return None
+        
+        print(f"Processing {len(tickets_df)} tickets...")
+        
+        # Process each ticket
+        results = []
+        for idx, ticket in tickets_df.iterrows():
+            message = ticket.get('message', '')
+            
+            # Extract insights
+            topics = self.extract_topics(message)
+            intent = self.classify_intent(message)
+            growth_signals = self.detect_growth_signals(message)
+            entities = self.extract_entities(message)
+            urgency_score = self.calculate_urgency_score(message, ticket.get('priority', 'medium'))
+            
+            result = {
+                'ticket_id': ticket.get('ticket_id', f'ticket_{idx}'),
+                'user_id': ticket.get('user_id', ''),
+                'original_topic': ticket.get('topic', ''),
+                'detected_topics': topics,
+                'primary_topic': topics[0] if topics else 'general',
+                'intent': intent,
+                'growth_signals': growth_signals,
+                'urgency_score': round(urgency_score, 2),
+                'entities': entities,
+                'created_at': ticket.get('created_at', datetime.now()),
+                'status': ticket.get('status', ''),
+                'processed_at': datetime.now(),
+                'original_message': message
+            }
+            
+            results.append(result)
+            
+            # Show progress every 100 tickets
+            if (idx + 1) % 100 == 0:
+                print(f"  Processed {idx + 1}/{len(tickets_df)} tickets...")
+        
+        # Convert to DataFrame
+        results_df = pd.DataFrame(results)
+        
+        # Add some aggregated insights
+        results_df['has_growth_signal'] = results_df['growth_signals'].apply(lambda x: len(x) > 0)
+        results_df['is_frustrated'] = results_df['intent'] == 'frustration'
+        results_df['is_expansion_interested'] = results_df['intent'] == 'expansion_interest'
+        
+        print("✅ NLP processing complete!")
+        return results_df
+
+    def save_to_csv(self, results_df, output_path='support_ticket_nlp_results.csv'):
+        """Save results to CSV"""
+        # Convert lists to JSON strings for CSV
+        csv_df = results_df.copy()
+        csv_df['detected_topics'] = csv_df['detected_topics'].apply(json.dumps)
+        csv_df['growth_signals'] = csv_df['growth_signals'].apply(json.dumps)
+        csv_df['entities'] = csv_df['entities'].apply(json.dumps)
+        
+        csv_df.to_csv(output_path, index=False)
+        print(f"💾 Results saved to {output_path}")
+
+    def generate_insights_summary(self, results_df):
         """Generate summary insights from processed tickets"""
-        if len(results_df) == 0:
-            return {}
         
         total_tickets = len(results_df)
         
@@ -353,3 +275,45 @@ except (OSError, ImportError):
         }
         
         return summary
+
+    def show_sample_results(self, results_df, n=5):
+        """Display sample results"""
+        print(f"\n📋 Sample of {n} processed tickets:")
+        print("="*80)
+        
+        sample = results_df.head(n)
+        for _, ticket in sample.iterrows():
+            print(f"Ticket ID: {ticket['ticket_id']}")
+            print(f"Original Message: {ticket['original_message'][:100]}...")
+            print(f"Primary Topic: {ticket['primary_topic']}")
+            print(f"Intent: {ticket['intent']}")
+            print(f"Urgency Score: {ticket['urgency_score']}")
+            print(f"Growth Signals: {ticket['growth_signals']}")
+            print("-"*40)
+
+# Example usage
+if __name__ == "__main__":
+    # Initialize the parser
+    parser = SupportTicketNLPParser()
+    
+    # Process tickets from CSV
+    results = parser.process_tickets('support_tickets.csv')
+    
+    if results is not None:
+        # Save results
+        parser.save_to_csv(results)
+        
+        # Generate insights
+        insights = parser.generate_insights_summary(results)
+        
+        print("\n🎯 === NLP PROCESSING COMPLETE ===")
+        print(f"📊 Summary Insights:")
+        for key, value in insights.items():
+            print(f"  {key}: {value}")
+        
+        # Show sample results
+        parser.show_sample_results(results)
+        
+        print(f"\n✅ All done! Check 'support_ticket_nlp_results.csv' for full results.")
+    else:
+        print("❌ Processing failed. Please check your CSV file.")
