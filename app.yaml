@@ -1,21 +1,18 @@
-name: user-insights-nlp
+name: support-signal-miner
 services:
-- name: api
+- name: demo
   source_dir: /
   github:
     repo: kirstyn-nava/user_insights_nlp
     branch: main
-  run_command: uvicorn main:app --host 0.0.0.0 --port $PORT
+  run_command: streamlit run main.py --server.port $PORT --server.address 0.0.0.0
   environment_slug: python
   instance_count: 1
   instance_size_slug: basic-xxs
   http_port: 8080
   health_check:
-    http_path: /health
+    http_path: /_stcore/health
   envs:
-  - key: ENVIRONMENT
-    scope: RUN_TIME
-    value: production
   - key: PORT
     scope: RUN_TIME
     value: "8080"
