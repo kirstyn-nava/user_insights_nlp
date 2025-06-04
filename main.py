@@ -1,393 +1,197 @@
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional, Dict, List
-import os
+import streamlit as st
+import pandas as pd
 import json
-import asyncio
-import httpx
-from datetime import datetime, timedelta
-import logging
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
+from nlp_processor import SupportTicketNLPParser
+import io
 
-# Import our NLP processor (modified for async)
-from nlp_processor import SupportTicketNLPProcessor
+st.set_page_config(page_title="Support Signal Miner", page_icon="🎯", layout="wide")
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+st.title("🎯 Support Signal Miner")
+st.subheader("Real-time NLP processing of support tickets")
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="Attribution Model NLP Service",
-    description="Automated support ticket analysis and behavioral insights",
-    version="1.0.0"
-)
+# Initialize parser
+@st.cache_resource
+def load_parser():
+    return SupportTicketNLPParser()
 
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+parser = load_parser()
 
-# Security
-security = HTTPBearer()
-
-# Global variables
-nlp_processor = None
-scheduler = None
-processing_status = {
-    "last_run": None,
-    "status": "idle",
-    "tickets_processed": 0,
-    "errors": 0
+# Realistic demo tickets
+sample_tickets = {
+    "Hi, we're seeing some weird behavior with our main dashboard since yesterday. The CPU metrics are showing but memory graphs are completely blank, and our alerts aren't firing even though we know memory usage is high. This is our primary production monitoring dashboard that the whole engineering team relies on. Can someone help us figure out what's going on? We've tried refreshing but no luck.",
+    
+    "Hey team! We just closed our Series B and are planning to grow our engineering org from 15 to about 40 people over the next 6 months. Right now we have everyone on the free plan but we're starting to hit some limits with datasources and team management. Could someone walk me through what the team/enterprise options look like? Specifically interested in user management and permissions since we'll have multiple teams working on different projects.",
+    
+   "I'm trying to set up our Kubernetes cluster monitoring and I've got Prometheus running, but I'm having trouble getting the connection working in Grafana. The docs mention a few different approaches and I'm not sure which one makes the most sense for our setup. We're running on AWS EKS if that matters. Has anyone written up best practices for this kind of setup? Thanks!",
+    
+   "Quick question - we're using Datadog for APM but want to bring our infrastructure metrics into Grafana for a unified view. I see there's a Datadog integration but wondering about any gotchas before we dive in. Also curious if there's a way to sync our existing Datadog alerts or if we need to rebuild them? Our DevOps team is already pretty stretched so trying to minimize the migration overhead. Appreciate any guidance!"
 }
 
-# Pydantic models
-class ProcessingResult(BaseModel):
-    status: str
-    tickets_processed: int
-    processing_time: float
-    insights: Dict
-    timestamp: datetime
+# Sidebar for navigation
+st.sidebar.title("Demo Options")
+demo_mode = st.sidebar.radio("Choose demo mode:", 
+    ["Single Ticket Analysis", "Batch Processing"])
 
-class HealthCheck(BaseModel):
-    status: str
-    timestamp: datetime
-    uptime: str
-    last_processing: Optional[datetime]
-
-class TriggerRequest(BaseModel):
-    force_reprocess: bool = False
-    date_range_days: int = 1
-
-# Authentication
-async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Verify API token"""
-    expected_token = os.getenv("API_TOKEN", "dev-token-123")
-    if credentials.credentials != expected_token:
-        raise HTTPException(status_code=401, detail="Invalid authentication token")
-    return credentials
-
-# Initialize services
-async def initialize_services():
-    """Initialize NLP processor and scheduler"""
-    global nlp_processor, scheduler
+if demo_mode == "Single Ticket Analysis":
+    st.header("📝 Single Ticket Analysis")
     
-    try:
-        # Initialize NLP processor
-        project_id = os.getenv("GCP_PROJECT_ID", "mops-lab")
-        dataset_id = os.getenv("GCP_DATASET_ID", "user_signals")
-        
-        nlp_processor = SupportTicketNLPProcessor(project_id, dataset_id)
-        logger.info("✅ NLP processor initialized")
-        
-        # Initialize scheduler
-        scheduler = BackgroundScheduler()
-        
-        # Schedule daily processing at 6 AM UTC
-        scheduler.add_job(
-            func=scheduled_processing,
-            trigger=CronTrigger(hour=6, minute=0),
-            id='daily_nlp_processing',
-            replace_existing=True
-        )
-        
-        # Schedule weekly full reprocessing (Sundays at 2 AM)
-        scheduler.add_job(
-            func=weekly_full_processing,
-            trigger=CronTrigger(day_of_week=6, hour=2, minute=0),
-            id='weekly_full_processing',
-            replace_existing=True
-        )
-        
-        scheduler.start()
-        logger.info("✅ Scheduler started")
-        
-    except Exception as e:
-        logger.error(f"❌ Initialization failed: {str(e)}")
-        raise
+    # Quick demo buttons
+    st.write("**Quick Examples:**")
+    cols = st.columns(2)
+    with cols[0]:
+        for i, (label, text) in enumerate(list(sample_tickets.items())[:2]):
+            if st.button(label, key=f"btn_{i}"):
+                st.session_state.ticket_text = text
 
-async def scheduled_processing():
-    """Daily scheduled processing of new tickets"""
-    logger.info("🔄 Starting scheduled NLP processing...")
-    
-    try:
-        # Process tickets from last 24 hours
-        result = await process_support_tickets(days_back=1)
-        
-        # Trigger dbt refresh
-        await trigger_dbt_refresh()
-        
-        # Send success notification
-        await send_processing_notification(result, success=True)
-        
-        logger.info(f"✅ Scheduled processing complete: {result['tickets_processed']} tickets")
-        
-    except Exception as e:
-        logger.error(f"❌ Scheduled processing failed: {str(e)}")
-        await send_processing_notification({"error": str(e)}, success=False)
+    with cols[1]:
+        for i, (label, text) in enumerate(list(sample_tickets.items())[2:], 2):
+            if st.button(label, key=f"btn_{i}"):
+                st.session_state.ticket_text = text
 
-async def weekly_full_processing():
-    """Weekly full reprocessing of recent tickets"""
-    logger.info("🔄 Starting weekly full reprocessing...")
-    
-    try:
-        # Process tickets from last 30 days
-        result = await process_support_tickets(days_back=30, force_reprocess=True)
-        
-        # Trigger full dbt refresh
-        await trigger_dbt_refresh(full_refresh=True)
-        
-        logger.info(f"✅ Weekly processing complete: {result['tickets_processed']} tickets")
-        
-    except Exception as e:
-        logger.error(f"❌ Weekly processing failed: {str(e)}")
+    # Text input
+    ticket_text = st.text_area(
+        "Or paste your own support ticket:", 
+        value=st.session_state.get('ticket_text', ''), 
+        height=120,
+        placeholder="Paste a support ticket here to see NLP analysis..."
+    )
 
-async def process_support_tickets(days_back: int = 1, force_reprocess: bool = False) -> Dict:
-    """Core processing function"""
-    global processing_status
-    
-    start_time = datetime.now()
-    processing_status["status"] = "processing"
-    
-    try:
-        # Load and process tickets
-        results = await asyncio.to_thread(nlp_processor.process_tickets_timeframe, days_back, force_reprocess)
-        
-        # Save to BigQuery
-        await asyncio.to_thread(nlp_processor.save_to_bigquery, results)
-        
-        # Generate insights
-        insights = await asyncio.to_thread(nlp_processor.generate_insights_summary, results)
-        
-        processing_time = (datetime.now() - start_time).total_seconds()
-        
-        # Update status
-        processing_status.update({
-            "last_run": datetime.now(),
-            "status": "completed",
-            "tickets_processed": len(results),
-            "errors": 0
-        })
-        
-        return {
-            "status": "success",
-            "tickets_processed": len(results),
-            "processing_time": processing_time,
-            "insights": insights,
-            "timestamp": datetime.now()
-        }
-        
-    except Exception as e:
-        processing_status.update({
-            "status": "error",
-            "errors": processing_status["errors"] + 1
-        })
-        raise e
-
-async def trigger_dbt_refresh(full_refresh: bool = False):
-    """Trigger dbt Cloud job refresh"""
-    dbt_webhook_url = os.getenv("DBT_WEBHOOK_URL")
-    dbt_token = os.getenv("DBT_API_TOKEN")
-    
-    if not dbt_webhook_url or not dbt_token:
-        logger.warning("⚠️ dbt configuration missing, skipping refresh")
-        return
-    
-    try:
-        headers = {
-            "Authorization": f"Token {dbt_token}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "cause": "NLP processing completed",
-            "git_sha": None,
-            "schema_override": None,
-            "dbt_version_override": None,
-            "timeout_seconds": 3600,
-            "generate_docs": True,
-            "run_steps": [
-                "dbt run --models engagement_fatigue_scores behavioral_segments"
-            ]
-        }
-        
-        if full_refresh:
-            payload["run_steps"] = ["dbt run --full-refresh"]
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.post(dbt_webhook_url, headers=headers, json=payload)
+    if ticket_text:
+        with st.spinner("🤖 Processing with SpaCy NLP..."):
+            # Process with your existing methods
+            topics = parser.extract_topics(ticket_text)
+            intent = parser.classify_intent(ticket_text)
+            growth_signals = parser.detect_growth_signals(ticket_text)
+            entities = parser.extract_entities(ticket_text)
+            urgency = parser.calculate_urgency_score(ticket_text, 'medium')
             
-        if response.status_code == 200:
-            logger.info("✅ dbt refresh triggered successfully")
-        else:
-            logger.error(f"❌ dbt refresh failed: {response.status_code} - {response.text}")
+            # Results display
+            st.header("🎯 Analysis Results")
             
-    except Exception as e:
-        logger.error(f"❌ dbt refresh error: {str(e)}")
-
-async def send_processing_notification(result: Dict, success: bool = True):
-    """Send processing notifications to Slack/email"""
-    slack_webhook = os.getenv("SLACK_WEBHOOK_URL")
-    
-    if not slack_webhook:
-        return
-    
-    try:
-        if success:
-            message = f"""
-🤖 *NLP Processing Complete*
-✅ Status: Success
-📊 Tickets Processed: {result.get('tickets_processed', 0)}
-⏱️ Processing Time: {result.get('processing_time', 0):.1f}s
-🎯 Growth Signals: {result.get('insights', {}).get('growth_signals_detected', 0)}
-😤 Frustrated Customers: {result.get('insights', {}).get('frustrated_customers', 0)}
-            """
-        else:
-            message = f"""
-🚨 *NLP Processing Failed*
-❌ Error: {result.get('error', 'Unknown error')}
-🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-            """
-        
-        payload = {"text": message}
-        
-        async with httpx.AsyncClient() as client:
-            await client.post(slack_webhook, json=payload)
+            # Key metrics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Primary Topic", topics[0] if topics else "general")
+            with col2:
+                st.metric("Intent", intent.replace('_', ' ').title())
+            with col3:
+                st.metric("Urgency Score", f"{urgency:.2f}")
+            with col4:
+                st.metric("Growth Signals", len(growth_signals))
             
-    except Exception as e:
-        logger.error(f"❌ Notification failed: {str(e)}")
+            # Detailed breakdown
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("**📊 All Topics Detected:**")
+                st.write(", ".join(topics) if topics else "general")
+                
+                if growth_signals:
+                    st.write("**📈 Growth Signals:**")
+                    for signal in growth_signals:
+                        st.write(f"• {signal.replace('_', ' ').title()}")
+            
+            with col2:
+                if entities.get('organizations') or entities.get('technologies'):
+                    st.write("**🏢 Entities Found:**")
+                    if entities.get('organizations'):
+                        st.write(f"Organizations: {', '.join(entities['organizations'])}")
+                    if entities.get('technologies'):
+                        st.write(f"Technologies: {', '.join(entities['technologies'])}")
+                
+                # Segment recommendation
+                st.write("**🎯 Recommended Segment:**")
+                if intent == 'expansion_interest' or growth_signals:
+                    st.success("→ High-Value Expansion Prospects")
+                elif intent == 'frustration' and urgency > 0.7:
+                    st.error("→ At-Risk Customer - Priority Support")
+                elif intent == 'curiosity':
+                    st.info("→ Education-Ready Users")
+                else:
+                    st.write("→ General Support Queue")
 
-# API Endpoints
-@app.on_event("startup")
-async def startup_event():
-    """Initialize services on startup"""
-    await initialize_services()
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    if scheduler:
-        scheduler.shutdown()
-
-@app.get("/health", response_model=HealthCheck)
-async def health_check():
-    """Health check endpoint"""
-    uptime = datetime.now() - datetime.fromtimestamp(os.path.getctime(__file__))
+else:  # Batch Processing
+    st.header("📊 Batch Processing Demo")
     
-    return HealthCheck(
-        status="healthy" if processing_status["status"] != "error" else "degraded",
-        timestamp=datetime.now(),
-        uptime=str(uptime),
-        last_processing=processing_status.get("last_run")
-    )
-
-@app.post("/process", response_model=ProcessingResult)
-async def manual_trigger(
-    background_tasks: BackgroundTasks,
-    request: TriggerRequest,
-    credentials: HTTPAuthorizationCredentials = Depends(verify_token)
-):
-    """Manually trigger NLP processing"""
+    # File upload
+    uploaded_file = st.file_uploader("Upload CSV file with support tickets", type="csv")
     
-    if processing_status["status"] == "processing":
-        raise HTTPException(status_code=409, detail="Processing already in progress")
+    if uploaded_file:
+        # Read CSV
+        df = pd.read_csv(uploaded_file)
+        st.write(f"📁 Loaded {len(df)} tickets")
+        st.write("**Preview:**")
+        st.dataframe(df.head())
+        
+        if st.button("🚀 Process All Tickets"):
+            with st.spinner(f"Processing {len(df)} tickets..."):
+                # Save uploaded file temporarily
+                df.to_csv('temp_tickets.csv', index=False)
+                
+                # Process with your existing method
+                results = parser.process_tickets('temp_tickets.csv')
+                
+                if results is not None:
+                    # Generate insights
+                    insights = parser.generate_insights_summary(results)
+                    
+                    # Display results
+                    st.success("✅ Processing Complete!")
+                    
+                    # Key metrics
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Total Processed", insights['total_tickets_processed'])
+                    with col2:
+                        st.metric("Growth Signals", insights['growth_signals_detected'])
+                    with col3:
+                        st.metric("Frustrated Users", insights['frustrated_customers'])
+                    with col4:
+                        st.metric("Avg Urgency", insights['average_urgency_score'])
+                    
+                    # Charts
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write("**📊 Top Topics:**")
+                        topic_df = pd.DataFrame(list(insights['top_topics'].items()), 
+                                              columns=['Topic', 'Count'])
+                        st.bar_chart(topic_df.set_index('Topic'))
+                    
+                    with col2:
+                        st.write("**😊 Intent Distribution:**")
+                        intent_df = pd.DataFrame(list(insights['intent_distribution'].items()), 
+                                               columns=['Intent', 'Count'])
+                        st.bar_chart(intent_df.set_index('Intent'))
+                    
+                    # Download results
+                    csv_buffer = io.StringIO()
+                    # Convert results for CSV download
+                    csv_results = results.copy()
+                    csv_results['detected_topics'] = csv_results['detected_topics'].apply(json.dumps)
+                    csv_results['growth_signals'] = csv_results['growth_signals'].apply(json.dumps)
+                    csv_results['entities'] = csv_results['entities'].apply(json.dumps)
+                    csv_results.to_csv(csv_buffer, index=False)
+                    
+                    st.download_button(
+                        label="📥 Download Results CSV",
+                        data=csv_buffer.getvalue(),
+                        file_name="support_ticket_nlp_results.csv",
+                        mime="text/csv"
+                    )
+
+with st.expander("🚀 How This Powers Dynamic Segmentation"):
+    st.write("""
+    **This NLP analysis automatically creates intelligent user segments:**
     
-    # Run processing in background
-    background_tasks.add_task(
-        process_support_tickets, 
-        request.date_range_days, 
-        request.force_reprocess
-    )
+    • **High-Value Expansion Prospects** → Enterprise event invitations
+    • **At-Risk Customers** → Reduced email frequency + priority support  
+    • **Education-Ready Users** → Tutorial webinars and documentation
+    • **Technical Power Users** → Advanced feature announcements
     
-    return ProcessingResult(
-        status="started",
-        tickets_processed=0,
-        processing_time=0.0,
-        insights={},
-        timestamp=datetime.now()
-    )
+    All segments update in real-time as new support tickets are processed, 
+    feeding directly into Customer.io for personalized campaign targeting.
+    """)
 
-@app.get("/status")
-async def get_processing_status(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    """Get current processing status"""
-    return processing_status
-
-@app.post("/dbt/trigger")
-async def trigger_dbt_manual(
-    full_refresh: bool = False,
-    credentials: HTTPAuthorizationCredentials = Depends(verify_token)
-):
-    """Manually trigger dbt refresh"""
-    await trigger_dbt_refresh(full_refresh)
-    return {"status": "triggered", "full_refresh": full_refresh}
-
-@app.get("/insights/latest")
-async def get_latest_insights(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    """Get latest processing insights"""
-    
-    try:
-        # Query latest insights from BigQuery
-        insights = await asyncio.to_thread(nlp_processor.get_latest_insights)
-        return insights
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/test/process-sample")
-async def test_process_sample(credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
-    """Test endpoint with sample data"""
-    
-    try:
-        # Process a small sample for testing
-        result = await process_support_tickets(days_back=1)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# WebSocket endpoint for real-time updates (optional)
-@app.websocket("/ws/status")
-async def websocket_status(websocket):
-    """WebSocket for real-time status updates"""
-    await websocket.accept()
-    
-    try:
-        while True:
-            await websocket.send_json(processing_status)
-            await asyncio.sleep(5)  # Send update every 5 seconds
-    except Exception as e:
-        logger.error(f"WebSocket error: {str(e)}")
-    finally:
-        await websocket.close()
-
-# Root endpoint
-@app.get("/")
-async def root():
-    """Root endpoint with service info"""
-    return {
-        "service": "Attribution Model NLP Service",
-        "version": "1.0.0",
-        "status": "running",
-        "endpoints": {
-            "health": "/health",
-            "process": "/process",
-            "status": "/status",
-            "insights": "/insights/latest"
-        }
-    }
-
-if __name__ == "__main__":
-    import uvicorn
-    
-    # Development server
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", 8000)),
-        reload=os.getenv("ENVIRONMENT") == "development"
-    )
+# Footer
+st.markdown("---")
+st.markdown("*Built with SpaCy NLP • Powered by DigitalOcean App Platform*")
